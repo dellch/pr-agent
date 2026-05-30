@@ -120,6 +120,39 @@ def extract_jira_tickets(text, max_characters=MAX_TICKET_CHARACTERS):
     return tickets_content
 
 
+def _get_pr_title(git_provider) -> str:
+    """Return the PR/MR title across providers (GitHub/Bitbucket use .pr, GitLab .mr)."""
+    for attr in ("pr", "mr"):
+        obj = getattr(git_provider, attr, None)
+        title = getattr(obj, "title", None)
+        if title:
+            return title
+    return ""
+
+
+def add_jira_tickets(git_provider, tickets_content):
+    """
+    Provider-agnostic Jira lookup. Scans the PR title, description and branch name for
+    Jira ticket keys and appends any found tickets to tickets_content (de-duplicated by
+    ticket_url). No-op when Jira is not configured. Works for any git provider, since it
+    only relies on get_user_description() and get_pr_branch().
+    """
+    try:
+        jira_context = "\n".join(filter(None, [
+            _get_pr_title(git_provider),
+            git_provider.get_user_description() or "",
+            git_provider.get_pr_branch() or "",
+        ]))
+        existing_urls = {t.get("ticket_url") for t in tickets_content}
+        for jira_ticket in extract_jira_tickets(jira_context, MAX_TICKET_CHARACTERS):
+            if jira_ticket.get("ticket_url") not in existing_urls:
+                tickets_content.append(jira_ticket)
+    except Exception as e:
+        get_logger().error(f"Error extracting Jira tickets: {e}",
+                           artifact={"traceback": traceback.format_exc()})
+    return tickets_content
+
+
 def extract_ticket_links_from_pr_description(pr_description, repo_path, base_url_html='https://github.com'):
     """
     Extract all ticket links from PR description
@@ -192,6 +225,8 @@ def extract_ticket_links_from_branch_name(branch_name, repo_path, base_url_html=
 
 async def extract_tickets(git_provider):
     try:
+        tickets_content = []
+
         if isinstance(git_provider, GithubProvider):
             user_description = git_provider.get_user_description()
             description_tickets = extract_ticket_links_from_pr_description(
@@ -212,7 +247,6 @@ async def extract_tickets(git_provider):
                 tickets = merged[:MAX_TICKETS]
             else:
                 tickets = merged
-            tickets_content = []
 
             if tickets:
 
@@ -272,11 +306,8 @@ async def extract_tickets(git_provider):
                         'sub_issues': sub_issues_content  # Store sub-issues content
                     })
 
-                return tickets_content
-
         elif isinstance(git_provider, AzureDevopsProvider):
             tickets_info = git_provider.get_linked_work_items()
-            tickets_content = []
             for ticket in tickets_info:
                 try:
                     ticket_body_str = ticket.get("body", "")
@@ -299,24 +330,12 @@ async def extract_tickets(git_provider):
                         artifact={"traceback": traceback.format_exc()},
                     )
 
-            # Azure DevOps PRs are not always linked to Boards work items. If Jira is
-            # configured, also look for Jira ticket keys in the PR title, description and
-            # branch name, and add any tickets found. No-op when Jira is not configured.
-            try:
-                jira_context = "\n".join(filter(None, [
-                    git_provider.pr.title if git_provider.pr else "",
-                    git_provider.get_user_description() or "",
-                    git_provider.get_pr_branch() or "",
-                ]))
-                existing_urls = {t.get("ticket_url") for t in tickets_content}
-                for jira_ticket in extract_jira_tickets(jira_context, MAX_TICKET_CHARACTERS):
-                    if jira_ticket.get("ticket_url") not in existing_urls:
-                        tickets_content.append(jira_ticket)
-            except Exception as e:
-                get_logger().error(f"Error extracting Jira tickets: {e}",
-                                   artifact={"traceback": traceback.format_exc()})
+        # Provider-agnostic Jira lookup. Tickets are often referenced by key in the PR
+        # title, description or branch name rather than via a provider-native link, so
+        # this runs for every provider and is a no-op when Jira is not configured.
+        add_jira_tickets(git_provider, tickets_content)
 
-            return tickets_content
+        return tickets_content
 
     except Exception as e:
         get_logger().error(f"Error extracting tickets error= {e}",

@@ -2,6 +2,8 @@ from unittest.mock import MagicMock, patch
 
 from pr_agent.config_loader import get_settings
 from pr_agent.tools.ticket_pr_compliance_check import (
+    _get_pr_title,
+    add_jira_tickets,
     extract_jira_tickets,
     find_jira_tickets,
 )
@@ -161,3 +163,69 @@ class TestExtractJiraTickets:
         with patch("pr_agent.tools.ticket_pr_compliance_check.Jira", return_value=client):
             result = extract_jira_tickets("abc-123 utf-8")
         assert [t["ticket_id"] for t in result] == ["ABC-123"]
+
+
+class TestGetPrTitle:
+    """Provider-agnostic title access (GitHub/Bitbucket use .pr, GitLab uses .mr)."""
+
+    def test_reads_pr_title(self):
+        gp = MagicMock(spec=["pr"])
+        gp.pr = MagicMock(title="From PR object")
+        assert _get_pr_title(gp) == "From PR object"
+
+    def test_reads_mr_title_when_no_pr(self):
+        """GitLab stores the merge request as .mr, not .pr."""
+        gp = MagicMock(spec=["mr"])
+        gp.mr = MagicMock(title="From MR object")
+        assert _get_pr_title(gp) == "From MR object"
+
+    def test_returns_empty_when_no_title(self):
+        gp = MagicMock(spec=[])
+        assert _get_pr_title(gp) == ""
+
+
+class TestAddJiraTickets:
+    """Provider-agnostic Jira append used by extract_tickets for every provider."""
+
+    def _provider(self, title="", description="", branch=""):
+        gp = MagicMock(spec=["pr", "get_user_description", "get_pr_branch"])
+        gp.pr = MagicMock(title=title)
+        gp.get_user_description.return_value = description
+        gp.get_pr_branch.return_value = branch
+        return gp
+
+    def _configure_jira(self):
+        get_settings().set("JIRA.JIRA_BASE_URL", "https://acme.atlassian.net")
+        get_settings().set("JIRA.JIRA_API_EMAIL", "me@acme.com")
+        get_settings().set("JIRA.JIRA_API_TOKEN", "token123")
+        get_settings().set("JIRA.JIRA_REQUIREMENTS_FIELD", "")
+
+    def test_appends_ticket_from_any_provider(self):
+        """Works off get_user_description + get_pr_branch, so it is provider-neutral."""
+        self._configure_jira()
+        client = MagicMock()
+        client.issue.return_value = {"fields": {"summary": "T", "description": "B", "labels": []}}
+        gp = self._provider(branch="feature/ABC-123-x")
+        out = []
+        with patch("pr_agent.tools.ticket_pr_compliance_check.Jira", return_value=client):
+            add_jira_tickets(gp, out)
+        assert [t["ticket_id"] for t in out] == ["ABC-123"]
+
+    def test_dedupes_against_existing_tickets(self):
+        """A Jira ticket already present (same url) is not added twice."""
+        self._configure_jira()
+        client = MagicMock()
+        client.issue.return_value = {"fields": {"summary": "T", "description": "B", "labels": []}}
+        gp = self._provider(title="ABC-123")
+        existing = [{"ticket_url": "https://acme.atlassian.net/browse/ABC-123"}]
+        with patch("pr_agent.tools.ticket_pr_compliance_check.Jira", return_value=client):
+            add_jira_tickets(gp, existing)
+        assert len(existing) == 1
+
+    def test_noop_when_jira_not_configured(self):
+        get_settings().set("JIRA.JIRA_BASE_URL", "")
+        get_settings().set("JIRA.JIRA_API_TOKEN", "")
+        gp = self._provider(branch="feature/ABC-123-x")
+        out = []
+        add_jira_tickets(gp, out)
+        assert out == []
