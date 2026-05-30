@@ -1,6 +1,8 @@
 import re
 import traceback
 
+from atlassian import Jira
+
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import GithubProvider
 from pr_agent.git_providers import AzureDevopsProvider
@@ -14,7 +16,9 @@ GITHUB_TICKET_PATTERN = re.compile(
 BRANCH_ISSUE_PATTERN = re.compile(r"(?:^|/)(\d{1,6})(?=-|$)")
 
 def find_jira_tickets(text):
-    # Regular expression patterns for JIRA tickets
+    # Regular expression patterns for JIRA tickets. Matching is case-insensitive so
+    # lowercased branch names (e.g. bugfix/abc-123-description) are detected; keys are
+    # normalized to upper case to match Jira's canonical form.
     patterns = [
         r'\b[A-Z]{2,10}-\d{1,7}\b',  # Standard JIRA ticket format (e.g., PROJ-123)
         r'(?:https?://[^\s/]+/browse/)?([A-Z]{2,10}-\d{1,7})\b'  # JIRA URL or just the ticket
@@ -22,7 +26,7 @@ def find_jira_tickets(text):
 
     tickets = set()
     for pattern in patterns:
-        matches = re.findall(pattern, text)
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
         for match in matches:
             if isinstance(match, tuple):
                 # If it's a tuple (from the URL pattern), take the last non-empty group
@@ -30,9 +34,78 @@ def find_jira_tickets(text):
             else:
                 ticket = match
             if ticket:
-                tickets.add(ticket)
+                tickets.add(ticket.upper())
 
     return list(tickets)
+
+
+def _get_jira_client():
+    """
+    Build a Jira client from the [jira] settings. Returns None if Jira is not configured.
+    Cloud uses email + API token; Server/Data Center uses username + password, or a PAT
+    (passed as the token) together with a base url.
+    """
+    base_url = get_settings().get("JIRA.JIRA_BASE_URL", None)
+    api_email = get_settings().get("JIRA.JIRA_API_EMAIL", None)
+    api_token = get_settings().get("JIRA.JIRA_API_TOKEN", None)
+    if not (base_url and api_token):
+        return None
+    try:
+        if api_email:
+            return Jira(url=base_url.rstrip("/"), username=api_email, password=api_token)
+        # No email/username: treat the token as a Server/Data Center PAT.
+        return Jira(url=base_url.rstrip("/"), token=api_token)
+    except Exception as e:
+        get_logger().error(f"Failed to initialize Jira client: {e}",
+                           artifact={"traceback": traceback.format_exc()})
+        return None
+
+
+def extract_jira_tickets(text, max_characters=10000):
+    """
+    Find Jira ticket keys in the given text and fetch their content. Returns a list of
+    ticket dicts in the same shape used by the rest of the ticket-analysis flow. Returns
+    an empty list when Jira is not configured or no keys are found.
+    """
+    jira_client = _get_jira_client()
+    if jira_client is None:
+        return []
+
+    base_url = get_settings().get("JIRA.JIRA_BASE_URL", "").rstrip("/")
+    keys = find_jira_tickets(text or "")
+    if len(keys) > 3:
+        get_logger().info(f"Too many Jira tickets found: {len(keys)}; limiting to 3")
+        keys = keys[:3]
+
+    tickets_content = []
+    for key in keys:
+        try:
+            issue = jira_client.issue(key)
+        except Exception as e:
+            get_logger().warning(f"Failed to fetch Jira ticket {key}: {e}")
+            continue
+        if not issue:
+            continue
+
+        fields = issue.get("fields", {}) or {}
+        body = fields.get("description") or ""
+        if not isinstance(body, str):
+            # API v3 returns description as an ADF object; v2 (our default) returns a
+            # string. Skip the body rather than dumping raw JSON if a v3 server is used.
+            body = ""
+        if len(body) > max_characters:
+            body = body[:max_characters] + "..."
+
+        labels = fields.get("labels", []) or []
+        tickets_content.append({
+            "ticket_id": key,
+            "ticket_url": f"{base_url}/browse/{key}" if base_url else "",
+            "title": fields.get("summary", ""),
+            "body": body,
+            "requirements": "",
+            "labels": ", ".join(labels),
+        })
+    return tickets_content
 
 
 def extract_ticket_links_from_pr_description(pr_description, repo_path, base_url_html='https://github.com'):
@@ -214,6 +287,24 @@ async def extract_tickets(git_provider):
                         f"Error processing Azure DevOps ticket: {e}",
                         artifact={"traceback": traceback.format_exc()},
                     )
+
+            # Azure DevOps PRs are not always linked to Boards work items. If Jira is
+            # configured, also look for Jira ticket keys in the PR title, description and
+            # branch name, and add any tickets found. No-op when Jira is not configured.
+            try:
+                jira_context = "\n".join(filter(None, [
+                    git_provider.pr.title if git_provider.pr else "",
+                    git_provider.get_user_description() or "",
+                    git_provider.get_pr_branch() or "",
+                ]))
+                existing_urls = {t.get("ticket_url") for t in tickets_content}
+                for jira_ticket in extract_jira_tickets(jira_context, MAX_TICKET_CHARACTERS):
+                    if jira_ticket.get("ticket_url") not in existing_urls:
+                        tickets_content.append(jira_ticket)
+            except Exception as e:
+                get_logger().error(f"Error extracting Jira tickets: {e}",
+                                   artifact={"traceback": traceback.format_exc()})
+
             return tickets_content
 
     except Exception as e:

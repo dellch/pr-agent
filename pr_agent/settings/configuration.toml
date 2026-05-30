@@ -318,6 +318,14 @@ pr_commands = [
     "/improve --pr_code_suggestions.commitable_code_suggestions=true",
 ]
 
+[jira]
+# Credentials for fetching ticket context from Jira (Cloud or Server/Data Center).
+# Leave empty to disable Jira ticket lookup. Set these via environment variables or
+# the secrets file rather than committing them (e.g. jira__jira_api_token).
+jira_base_url = ""   # e.g. https://your-org.atlassian.net (required for Server/PAT and shortened keys)
+jira_api_email = ""  # Atlassian account email (Cloud), or username (Server basic auth)
+jira_api_token = ""  # API token (Cloud), password (Server basic auth), or PAT (Server)
+
 [litellm]
 # use_client = false
 # drop_params = false
