@@ -15,6 +15,10 @@ GITHUB_TICKET_PATTERN = re.compile(
 # Option A: issue number at start of branch or after /, followed by - or end (e.g. feature/1-test-issue, 123-fix)
 BRANCH_ISSUE_PATTERN = re.compile(r"(?:^|/)(\d{1,6})(?=-|$)")
 
+# Max number of tickets to analyse per PR, and max characters of ticket body to keep.
+MAX_TICKETS = 3
+MAX_TICKET_CHARACTERS = 10000
+
 def find_jira_tickets(text):
     # Regular expression patterns for JIRA tickets. Matching is case-insensitive so
     # lowercased branch names (e.g. bugfix/abc-123-description) are detected; keys are
@@ -61,7 +65,7 @@ def _get_jira_client():
         return None
 
 
-def extract_jira_tickets(text, max_characters=10000):
+def extract_jira_tickets(text, max_characters=MAX_TICKET_CHARACTERS):
     """
     Find Jira ticket keys in the given text and fetch their content. Returns a list of
     ticket dicts in the same shape used by the rest of the ticket-analysis flow. Returns
@@ -72,10 +76,14 @@ def extract_jira_tickets(text, max_characters=10000):
         return []
 
     base_url = get_settings().get("JIRA.JIRA_BASE_URL", "").rstrip("/")
+    # Custom field that holds acceptance criteria / requirements. The field id is
+    # instance-specific (e.g. "customfield_10127"), so it must be configured; empty
+    # means no requirements are extracted.
+    requirements_field = get_settings().get("JIRA.JIRA_REQUIREMENTS_FIELD", "") or ""
     keys = find_jira_tickets(text or "")
-    if len(keys) > 3:
-        get_logger().info(f"Too many Jira tickets found: {len(keys)}; limiting to 3")
-        keys = keys[:3]
+    if len(keys) > MAX_TICKETS:
+        get_logger().info(f"Too many Jira tickets found: {len(keys)}; limiting to {MAX_TICKETS}")
+        keys = keys[:MAX_TICKETS]
 
     tickets_content = []
     for key in keys:
@@ -90,11 +98,15 @@ def extract_jira_tickets(text, max_characters=10000):
         fields = issue.get("fields", {}) or {}
         body = fields.get("description") or ""
         if not isinstance(body, str):
-            # API v3 returns description as an ADF object; v2 (our default) returns a
-            # string. Skip the body rather than dumping raw JSON if a v3 server is used.
             body = ""
         if len(body) > max_characters:
             body = body[:max_characters] + "..."
+
+        requirements = ""
+        if requirements_field:
+            requirements = fields.get(requirements_field) or ""
+            if not isinstance(requirements, str):
+                requirements = ""
 
         labels = fields.get("labels", []) or []
         tickets_content.append({
@@ -102,7 +114,7 @@ def extract_jira_tickets(text, max_characters=10000):
             "ticket_url": f"{base_url}/browse/{key}" if base_url else "",
             "title": fields.get("summary", ""),
             "body": body,
-            "requirements": "",
+            "requirements": requirements,
             "labels": ", ".join(labels),
         })
     return tickets_content
@@ -128,10 +140,10 @@ def extract_ticket_links_from_pr_description(pr_description, repo_path, base_url
                 if issue_number.isdigit() and len(issue_number) < 5 and repo_path:
                     github_tickets.add(f'{base_url_html.strip("/")}/{repo_path}/issues/{issue_number}')
 
-        if len(github_tickets) > 3:
+        if len(github_tickets) > MAX_TICKETS:
             get_logger().info(f"Too many tickets found in PR description: {len(github_tickets)}")
-            # Limit the number of tickets to 3
-            github_tickets = set(list(github_tickets)[:3])
+            # Limit the number of tickets
+            github_tickets = set(list(github_tickets)[:MAX_TICKETS])
     except Exception as e:
         get_logger().error(f"Error extracting tickets error= {e}",
                            artifact={"traceback": traceback.format_exc()})
@@ -179,7 +191,6 @@ def extract_ticket_links_from_branch_name(branch_name, repo_path, base_url_html=
 
 
 async def extract_tickets(git_provider):
-    MAX_TICKET_CHARACTERS = 10000
     try:
         if isinstance(git_provider, GithubProvider):
             user_description = git_provider.get_user_description()
@@ -196,9 +207,9 @@ async def extract_tickets(git_provider):
                 if link not in seen:
                     seen.add(link)
                     merged.append(link)
-            if len(merged) > 3:
+            if len(merged) > MAX_TICKETS:
                 get_logger().info(f"Too many tickets (description + branch): {len(merged)}")
-                tickets = merged[:3]
+                tickets = merged[:MAX_TICKETS]
             else:
                 tickets = merged
             tickets_content = []

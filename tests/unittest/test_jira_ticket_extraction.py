@@ -92,6 +92,28 @@ class TestExtractJiraTickets:
         assert result[0]["title"] == "Title"
         assert result[0]["labels"] == "a"
 
+    def test_requirements_field_populated_when_configured(self):
+        """When jira_requirements_field is set, that custom field maps to requirements."""
+        self._configure_jira()
+        get_settings().set("JIRA.JIRA_REQUIREMENTS_FIELD", "customfield_10127")
+        client = MagicMock()
+        client.issue.return_value = {"fields": {
+            "summary": "T", "description": "B", "labels": [],
+            "customfield_10127": "Acceptance criteria text",
+        }}
+        with patch("pr_agent.tools.ticket_pr_compliance_check.Jira", return_value=client):
+            result = extract_jira_tickets("ABC-1")
+        assert result[0]["requirements"] == "Acceptance criteria text"
+
+    def test_requirements_empty_when_field_not_configured(self):
+        """With no requirements field configured, requirements stays empty."""
+        self._configure_jira()
+        get_settings().set("JIRA.JIRA_REQUIREMENTS_FIELD", "")
+        client = self._fake_client()
+        with patch("pr_agent.tools.ticket_pr_compliance_check.Jira", return_value=client):
+            result = extract_jira_tickets("ABC-1")
+        assert result[0]["requirements"] == ""
+
     def test_checks_all_tickets_when_multiple(self):
         """When several distinct keys are present, each is fetched."""
         self._configure_jira()
