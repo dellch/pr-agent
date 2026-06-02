@@ -1,6 +1,12 @@
 import pytest
 
-from pr_agent.tools.ticket_pr_compliance_check import extract_ticket_links_from_branch_name
+from pr_agent.tools.ticket_pr_compliance_check import (
+    extract_ticket_links_from_branch_name,
+    extract_ticket_links_from_pr_description,
+)
+
+# The PR-description extractor caps results at 3 (hardcoded in the function).
+MAX_TICKETS = 3
 
 
 class TestExtractTicketsLinkFromBranchName:
@@ -110,3 +116,26 @@ class TestExtractTicketsLinkFromBranchName:
             "https://github.com/org/repo/issues/1",
             "https://github.com/org/repo/issues/2",
         }
+
+
+class TestExtractTicketLinksFromPrDescription:
+    """GitHub issue extraction from the PR description."""
+
+    def test_preserves_first_seen_order(self):
+        """Issues are returned in first-seen order, de-duplicated."""
+        desc = "Fixes #3, relates to #1, also #3 again and #2"
+        result = extract_ticket_links_from_pr_description(desc, "org/repo", "https://github.com")
+        assert result == [
+            "https://github.com/org/repo/issues/3",
+            "https://github.com/org/repo/issues/1",
+            "https://github.com/org/repo/issues/2",
+        ]
+
+    def test_cap_selects_deterministic_first_seen_subset(self):
+        """When more than MAX_TICKETS issues are present, the first MAX_TICKETS in
+        first-seen order are kept (not an arbitrary subset from a set)."""
+        nums = list(range(1, MAX_TICKETS + 4))
+        desc = " ".join(f"#{n}" for n in nums)
+        result = extract_ticket_links_from_pr_description(desc, "org/repo", "https://github.com")
+        expected = [f"https://github.com/org/repo/issues/{n}" for n in nums[:MAX_TICKETS]]
+        assert result == expected
