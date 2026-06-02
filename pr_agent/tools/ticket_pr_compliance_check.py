@@ -361,13 +361,21 @@ async def extract_tickets(git_provider):
                     if len(ticket_body_str) > MAX_TICKET_CHARACTERS:
                         ticket_body_str = ticket_body_str[:MAX_TICKET_CHARACTERS] + "..."
 
+                    # Cap acceptance criteria like the body, so a large work-item field
+                    # can't push an unbounded blob into the review prompt.
+                    requirements_str = ticket.get("acceptance_criteria", "") or ""
+                    if not isinstance(requirements_str, str):
+                        requirements_str = ""
+                    if len(requirements_str) > MAX_TICKET_CHARACTERS:
+                        requirements_str = requirements_str[:MAX_TICKET_CHARACTERS] + "..."
+
                     tickets_content.append(
                         {
                             "ticket_id": ticket.get("id"),
                             "ticket_url": ticket.get("url"),
                             "title": ticket.get("title"),
                             "body": ticket_body_str,
-                            "requirements": ticket.get("acceptance_criteria", ""),
+                            "requirements": requirements_str,
                             "labels": ", ".join(ticket.get("labels", [])),
                         }
                     )

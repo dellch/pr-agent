@@ -3,11 +3,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pr_agent.config_loader import get_settings
+from pr_agent.git_providers import AzureDevopsProvider
 from pr_agent.tools.ticket_pr_compliance_check import (
+    MAX_TICKET_CHARACTERS,
     _get_jira_client,
     _get_pr_title,
     add_jira_tickets,
     extract_jira_tickets,
+    extract_tickets,
     find_jira_tickets,
 )
 
@@ -361,3 +364,36 @@ class TestAddJiraTickets:
             add_jira_tickets(gp, existing)
         jira_cls.assert_not_called()
         assert len(existing) == MAX_TICKETS
+
+
+class TestAzureRequirementsTruncation:
+    """The Azure DevOps branch caps acceptance criteria like the body (no unbounded blob)."""
+
+    @pytest.mark.asyncio
+    async def test_acceptance_criteria_truncated(self):
+        gp = AzureDevopsProvider.__new__(AzureDevopsProvider)  # bypass __init__/network
+        gp.get_linked_work_items = MagicMock(return_value=[{
+            "id": 1,
+            "url": "https://dev.azure.com/org/proj/_workitems/edit/1",
+            "title": "Work item",
+            "body": "short body",
+            "acceptance_criteria": "x" * (MAX_TICKET_CHARACTERS + 50),
+            "labels": [],
+        }])
+        # Isolate the Azure branch: keep the provider-agnostic Jira step a no-op.
+        with patch("pr_agent.tools.ticket_pr_compliance_check.add_jira_tickets",
+                   side_effect=lambda gp, tc: tc):
+            result = await extract_tickets(gp)
+        assert result[0]["requirements"] == "x" * MAX_TICKET_CHARACTERS + "..."
+
+    @pytest.mark.asyncio
+    async def test_non_string_acceptance_criteria_becomes_empty(self):
+        gp = AzureDevopsProvider.__new__(AzureDevopsProvider)
+        gp.get_linked_work_items = MagicMock(return_value=[{
+            "id": 2, "url": "u", "title": "t", "body": "b",
+            "acceptance_criteria": {"unexpected": "dict"}, "labels": [],
+        }])
+        with patch("pr_agent.tools.ticket_pr_compliance_check.add_jira_tickets",
+                   side_effect=lambda gp, tc: tc):
+            result = await extract_tickets(gp)
+        assert result[0]["requirements"] == ""
